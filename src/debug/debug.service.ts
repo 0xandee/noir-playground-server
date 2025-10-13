@@ -139,16 +139,17 @@ compiler_version = ">=1.0.0"
       // Launch the debug session (this triggers the initialized event)
       await this.launchDAP(session);
 
+      // Wait for initial stopped event and get initial debug state
+      const stoppedEvent = await this.waitForStoppedEvent(session);
+      const initialDebugState = await this.getCurrentDebugState(session, stoppedEvent);
+
       session.initialized = true;
       this.logger.log(`Debug session ${sessionId} initialized successfully`);
 
       return {
         success: true,
         sessionId,
-        initialState: {
-          sessionId,
-          stopped: false,
-        },
+        initialState: initialDebugState,
       };
     } catch (error) {
       this.logger.error(`Failed to start debug session:`, error);
@@ -223,6 +224,22 @@ compiler_version = ">=1.0.0"
         // Get current state
         const state = await this.getCurrentDebugState(session, stoppedEvent);
 
+        // Cache current variables and witnesses for completion tracking
+        try {
+          const variablesResult = await this.getVariables(sessionId);
+          if (variablesResult.success) {
+            session.lastVariables = variablesResult.variables;
+          }
+
+          const witnessesResult = await this.getWitnessMap(sessionId);
+          if (witnessesResult.success) {
+            session.lastWitnesses = witnessesResult.witnesses;
+          }
+        } catch (cacheError) {
+          // Non-critical - log but don't fail the step
+          this.logger.debug('Failed to cache state for completion tracking:', cacheError);
+        }
+
         return {
           success: true,
           state,
@@ -279,6 +296,14 @@ compiler_version = ">=1.0.0"
       };
     }
 
+    // If session completed, return last known state
+    if (session.completed) {
+      return {
+        success: true,
+        variables: session.lastVariables || [],
+      };
+    }
+
     try {
       session.lastActivity = new Date();
 
@@ -290,11 +315,9 @@ compiler_version = ">=1.0.0"
       );
 
       if (!stackTraceResponse.success || !stackTraceResponse.body?.stackFrames?.length) {
-        // No stack frames yet (initial state) - return empty variables gracefully
-        this.logger.debug('No stack frames available - returning empty variables (this is expected initially)');
         return {
-          success: true,
-          variables: [],
+          success: false,
+          error: 'No stack frames available',
         };
       }
 
@@ -362,6 +385,14 @@ compiler_version = ">=1.0.0"
       return {
         success: false,
         error: 'Session not found or not initialized',
+      };
+    }
+
+    // If session completed, return last known state
+    if (session.completed) {
+      return {
+        success: true,
+        witnesses: session.lastWitnesses || [],
       };
     }
 
@@ -460,6 +491,14 @@ compiler_version = ">=1.0.0"
       };
     }
 
+    // If session completed, return empty opcodes (opcodes not cached)
+    if (session.completed) {
+      return {
+        success: true,
+        opcodes: [],
+      };
+    }
+
     try {
       session.lastActivity = new Date();
 
@@ -533,7 +572,20 @@ compiler_version = ">=1.0.0"
 
     session.dapProcess.on('exit', (code) => {
       this.logger.log(`[${session.sessionId}] Process exited with code ${code}`);
-      this.sessions.delete(session.sessionId);
+
+      // Mark session as completed instead of deleting immediately
+      // This allows the client to query the final state without "Session not found" errors
+      session.completed = true;
+      session.completedAt = new Date();
+
+      // Schedule cleanup after 30 seconds to allow client to fetch final state
+      setTimeout(() => {
+        const stillExists = this.sessions.get(session.sessionId);
+        if (stillExists) {
+          this.logger.log(`Cleaning up completed session: ${session.sessionId}`);
+          this.sessions.delete(session.sessionId);
+        }
+      }, 30000); // 30 second grace period
     });
 
     session.dapProcess.on('error', (error) => {
