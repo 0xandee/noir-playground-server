@@ -192,12 +192,36 @@ compiler_version = ">=1.0.0"
     try {
       session.lastActivity = new Date();
 
+      // === DIAGNOSTIC LOGGING: Step command entry ===
+      this.logger.log(`[STEP] Session ${sessionId}: User command '${command}' received`);
+
+      // Map user-friendly command to DAP protocol command
+      const dapCommand = this.mapStepCommandToDAP(command);
+
+      // === DIAGNOSTIC LOGGING: Command mapping ===
+      if (dapCommand !== command) {
+        this.logger.log(`[STEP] Session ${sessionId}: Mapped '${command}' → '${dapCommand}'`);
+      }
+
+      // === DIAGNOSTIC LOGGING: Before sending DAP request ===
+      this.logger.log(`[STEP] Session ${sessionId}: Sending DAP '${dapCommand}' request...`);
+      const requestStartTime = Date.now();
+
       // Send step command via DAP
-      const response = await this.sendDAPRequest(session, command, {
+      const response = await this.sendDAPRequest(session, dapCommand, {
         threadId: 1, // Noir typically uses thread ID 1
       });
 
+      // === DIAGNOSTIC LOGGING: DAP response received ===
+      const requestDuration = Date.now() - requestStartTime;
+      this.logger.log(`[STEP] Session ${sessionId}: DAP response received in ${requestDuration}ms - success: ${response.success}`);
+
+      if (response.body) {
+        this.logger.debug(`[STEP] Session ${sessionId}: Response body: ${JSON.stringify(response.body)}`);
+      }
+
       if (!response.success) {
+        this.logger.error(`[STEP] Session ${sessionId}: DAP request failed - ${response.message}`);
         return {
           success: false,
           error: response.message || 'Step command failed',
@@ -206,11 +230,15 @@ compiler_version = ">=1.0.0"
 
       // Wait for stopped event (with short wait to see if process exits)
       try {
+        this.logger.log(`[STEP] Session ${sessionId}: Waiting for 'stopped' event...`);
         const stoppedEvent = await this.waitForStoppedEvent(session);
+
+        // === DIAGNOSTIC LOGGING: Stopped event received ===
+        this.logger.log(`[STEP] Session ${sessionId}: Stopped event received - reason: '${stoppedEvent.body.reason}'`);
 
         // Check if process has exited (program completed)
         if (session.dapProcess.exitCode !== null) {
-          this.logger.log(`Program execution completed for session ${sessionId}`);
+          this.logger.log(`[STEP] Session ${sessionId}: Process exit detected - execution completed`);
           return {
             success: true,
             state: {
@@ -222,7 +250,24 @@ compiler_version = ">=1.0.0"
         }
 
         // Get current state
+        this.logger.log(`[STEP] Session ${sessionId}: Fetching current debug state...`);
         const state = await this.getCurrentDebugState(session, stoppedEvent);
+
+        // === DIAGNOSTIC LOGGING: Debug state retrieved ===
+        this.logger.log(`[STEP] Session ${sessionId}: Debug state - line: ${state.sourceLine}, file: ${state.sourceFile}, frameId: ${state.frameId}`);
+
+        // Get and log stack trace for deeper inspection
+        try {
+          const stackTraceResponse = await this.sendDAPRequest(session, 'stackTrace', { threadId: 1 });
+          if (stackTraceResponse.success && stackTraceResponse.body?.stackFrames) {
+            this.logger.log(`[STEP] Session ${sessionId}: Stack depth: ${stackTraceResponse.body.stackFrames.length} frame(s)`);
+            stackTraceResponse.body.stackFrames.forEach((frame: any, index: number) => {
+              this.logger.log(`[STEP] Session ${sessionId}:   Frame ${index}: ${frame.name} at line ${frame.line} (${frame.source?.name || 'unknown'})`);
+            });
+          }
+        } catch (stackError) {
+          this.logger.warn(`[STEP] Session ${sessionId}: Could not fetch detailed stack trace`);
+        }
 
         // Cache current variables and witnesses for completion tracking
         try {
@@ -927,6 +972,29 @@ compiler_version = ">=1.0.0"
     }
 
     return opcodes;
+  }
+
+  /**
+   * Map user-friendly step commands to DAP protocol commands
+   * DAP uses specific command names that differ from user-friendly names
+   */
+  private mapStepCommandToDAP(command: string): string {
+    const commandMap: Record<string, string> = {
+      'next': 'next',
+      'into': 'stepIn',  // DAP uses 'stepIn' not 'into'
+      'out': 'stepOut',  // DAP uses 'stepOut' not 'out'
+      'over': 'next',    // 'over' is an alias for 'next'
+      'continue': 'continue',
+      'step': 'next',    // 'step' is an alias for 'next'
+    };
+
+    const mappedCommand = commandMap[command] || command;
+
+    if (mappedCommand !== command) {
+      this.logger.debug(`Mapped command '${command}' to DAP command '${mappedCommand}'`);
+    }
+
+    return mappedCommand;
   }
 
   /**
