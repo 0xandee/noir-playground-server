@@ -11,7 +11,7 @@ import {
 import { DebugService } from './debug.service';
 import { StartDebugSessionDto } from './dto/start-debug-session.dto';
 import { StepCommandDto } from './dto/step-command.dto';
-import { SetBreakpointDto } from './dto/breakpoint.dto';
+import { SetBreakpointsRequestDto, SetBreakpointsResponseDto } from './dto/breakpoint.dto';
 import {
   StartDebugResult,
   StepResult,
@@ -77,6 +77,31 @@ export class DebugController {
     @Param('sessionId') sessionId: string,
   ): Promise<OpcodesResult> {
     return this.debugService.getOpcodes(sessionId);
+  }
+
+  /**
+   * Set breakpoints for a debug session
+   * POST /api/debug/breakpoints
+   */
+  @Post('breakpoints')
+  @HttpCode(HttpStatus.OK)
+  async setBreakpoints(
+    @Body() dto: SetBreakpointsRequestDto,
+  ): Promise<SetBreakpointsResponseDto> {
+    // Log what we received from the client
+    console.log('[DebugController] Received setBreakpoints request:', {
+      sessionId: dto.sessionId,
+      sourceFile: dto.sourceFile,
+      breakpointsCount: dto.breakpoints?.length || 0,
+      breakpoints: dto.breakpoints,
+    });
+
+    const result = await this.debugService.setBreakpoints(
+      dto.sessionId,
+      dto.breakpoints,
+      dto.sourceFile,
+    );
+    return result;
   }
 
   /**

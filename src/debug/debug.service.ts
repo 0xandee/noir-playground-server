@@ -24,6 +24,7 @@ import {
   Variable,
   WitnessEntry,
   OpcodeInfo,
+  VerifiedBreakpoint,
 } from './interfaces/debug-session.interface';
 import {
   DAPRequest,
@@ -32,6 +33,8 @@ import {
   InitializeRequestArguments,
   LaunchRequestArguments,
   StoppedEvent,
+  SetBreakpointsArguments,
+  SourceBreakpoint,
 } from './interfaces/dap-protocol.interface';
 
 @Injectable()
@@ -560,6 +563,101 @@ compiler_version = ">=1.0.0"
       return {
         success: false,
         error: error.message || 'Failed to get opcodes',
+      };
+    }
+  }
+
+  /**
+   * Set breakpoints for the debug session
+   * Following DAP protocol: client sends ALL breakpoints for a source file
+   */
+  async setBreakpoints(
+    sessionId: string,
+    breakpoints: SourceBreakpoint[],
+    sourceFile?: string,
+  ): Promise<{ success: boolean; breakpoints?: VerifiedBreakpoint[]; error?: string }> {
+    const session = this.sessions.get(sessionId);
+
+    if (!session || !session.initialized) {
+      return {
+        success: false,
+        error: 'Session not found or not initialized',
+      };
+    }
+
+    try {
+      session.lastActivity = new Date();
+
+      // Default to main.nr if no source file specified
+      const sourcePath = sourceFile || 'main.nr';
+
+      this.logger.log(`Setting ${breakpoints.length} breakpoint(s) for session ${sessionId} in ${sourcePath}`);
+
+      // Build DAP SetBreakpointsArguments
+      // IMPORTANT: DAP uses relative paths like "src/main.nr", not absolute paths
+      const relativePath = `src/${sourcePath}`;
+      const args: SetBreakpointsArguments = {
+        source: {
+          name: sourcePath,
+          path: relativePath,  // Use relative path that matches stack trace
+        },
+        breakpoints: breakpoints.map(bp => ({
+          line: bp.line,
+          column: bp.column,
+        })),
+        sourceModified: false,
+      };
+
+      // Log what we're sending to DAP
+      this.logger.log(`[BREAKPOINTS] Sending to DAP:`, JSON.stringify({
+        sourceName: args.source.name,
+        sourcePath: args.source.path,
+        breakpointsCount: args.breakpoints?.length || 0,
+        breakpoints: args.breakpoints,
+      }));
+
+      // Send setBreakpoints request to DAP
+      const response = await this.sendDAPRequest(session, 'setBreakpoints', args);
+
+      this.logger.log(`[BREAKPOINTS] DAP response received - success: ${response.success}`);
+      this.logger.log(`[BREAKPOINTS] Response body:`, JSON.stringify(response.body));
+
+      if (!response.success) {
+        this.logger.error(`Failed to set breakpoints: ${response.message}`);
+        return {
+          success: false,
+          error: response.message || 'Failed to set breakpoints',
+        };
+      }
+
+      // Parse verified breakpoints from DAP response
+      const verifiedBreakpoints: VerifiedBreakpoint[] = response.body?.breakpoints?.map(
+        (bp: any) => ({
+          line: bp.line,
+          verified: bp.verified,
+          message: bp.message,
+        }),
+      ) || [];
+
+      this.logger.log(`[BREAKPOINTS] Parsed ${verifiedBreakpoints.length} verified breakpoints`);
+      this.logger.log(`[BREAKPOINTS] Verified breakpoints:`, JSON.stringify(verifiedBreakpoints));
+
+      // Store verified breakpoints in session
+      session.breakpoints = verifiedBreakpoints;
+
+      this.logger.log(
+        `Set breakpoints for session ${sessionId}: ${verifiedBreakpoints.filter(bp => bp.verified).length}/${verifiedBreakpoints.length} verified`,
+      );
+
+      return {
+        success: true,
+        breakpoints: verifiedBreakpoints,
+      };
+    } catch (error) {
+      this.logger.error(`Set breakpoints failed:`, error);
+      return {
+        success: false,
+        error: error.message || 'Failed to set breakpoints',
       };
     }
   }
