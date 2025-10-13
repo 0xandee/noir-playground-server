@@ -50,6 +50,8 @@ coverage/
 *.spec.ts.results
 
 # Development files
+# Exception: Allow debug module source files
+!src/debug/**/*.ts
 debug-*.js
 debug-*.ts
 *.debug.js
