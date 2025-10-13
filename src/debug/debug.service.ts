@@ -45,6 +45,13 @@ export class DebugService implements OnModuleDestroy {
   private readonly SESSION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
   private cleanupInterval: NodeJS.Timeout;
 
+  // Configurable timeout values (loaded from config)
+  private readonly dapRequestTimeout: number;
+  private readonly dapDisconnectTimeout: number;
+  private readonly initializedTimeout: number;
+  private readonly stoppedTimeout: number;
+  private readonly compilationTimeout: number;
+
   private readonly defaultCargoToml = `[package]
 name = "playground"
 type = "bin"
@@ -55,6 +62,15 @@ compiler_version = ">=1.0.0"
 
   constructor(private configService: ConfigService) {
     this.baseDataPath = this.configService.getOrThrow<string>('noir.dataPath');
+
+    // Load timeout configurations with fallback defaults
+    this.dapRequestTimeout = this.configService.get<number>('debug.timeouts.dapRequest', 5000);
+    this.dapDisconnectTimeout = this.configService.get<number>('debug.timeouts.dapDisconnect', 180000);
+    this.initializedTimeout = this.configService.get<number>('debug.timeouts.initialized', 10000);
+    this.stoppedTimeout = this.configService.get<number>('debug.timeouts.stopped', 10000);
+    this.compilationTimeout = this.configService.get<number>('debug.timeouts.compilation', 60000);
+
+    this.logger.log(`Debug service initialized with timeouts: DAP=${this.dapRequestTimeout}ms, disconnect=${this.dapDisconnectTimeout}ms, compile=${this.compilationTimeout}ms`);
 
     // Start cleanup interval to remove stale sessions
     this.cleanupInterval = setInterval(
@@ -104,11 +120,11 @@ compiler_version = ">=1.0.0"
       await writeFile(join(workspaceDir, 'Prover.toml'), proverToml, 'utf-8');
 
       // Compile the program first (nargo dap requires a compiled artifact)
-      this.logger.log(`Compiling program for session ${sessionId}...`);
+      this.logger.log(`Compiling program for session ${sessionId} (timeout: ${this.compilationTimeout}ms)...`);
       const compileCommand = `cd "${workspaceDir}" && nargo compile`;
 
       try {
-        await promisify(exec)(compileCommand, { timeout: 60000 });
+        await promisify(exec)(compileCommand, { timeout: this.compilationTimeout });
         this.logger.log(`Compilation successful for session ${sessionId}`);
       } catch (error) {
         throw new Error(`Compilation failed: ${error.message}`);
@@ -663,35 +679,86 @@ compiler_version = ">=1.0.0"
   }
 
   /**
-   * Terminate a debug session
+   * Terminate a debug session with graceful disconnect and force-kill fallback
+   *
+   * Process:
+   * 1. Try graceful DAP disconnect (3-minute timeout)
+   * 2. If timeout/failure, proceed with force termination
+   * 3. Send SIGTERM to process
+   * 4. Wait 2 seconds for graceful exit
+   * 5. If still alive, send SIGKILL
+   * 6. Cleanup workspace regardless of outcome
    */
   async terminateSession(sessionId: string): Promise<boolean> {
     const session = this.sessions.get(sessionId);
 
     if (!session) {
+      this.logger.warn(`Terminate session failed: session ${sessionId} not found`);
       return false;
     }
 
-    this.logger.log(`Terminating debug session: ${sessionId}`);
+    this.logger.log(`[TERMINATE] Starting termination for session ${sessionId}`);
 
     try {
-      // Send disconnect request
-      if (session.initialized) {
-        await this.sendDAPRequest(session, 'disconnect', {});
+      // Step 1: Try graceful DAP disconnect (automatically uses 3-minute timeout)
+      if (session.initialized && session.dapProcess.exitCode === null) {
+        try {
+          this.logger.log(`[TERMINATE] Sending graceful disconnect request (timeout: ${this.dapDisconnectTimeout}ms)...`);
+          await this.sendDAPRequest(session, 'disconnect', {});
+          this.logger.log(`[TERMINATE] Graceful disconnect succeeded`);
+        } catch (disconnectError) {
+          // Disconnect timeout or failure - continue with force termination
+          this.logger.warn(`[TERMINATE] Disconnect failed or timed out: ${disconnectError.message}`);
+          this.logger.log(`[TERMINATE] Proceeding with force termination...`);
+        }
+      } else {
+        this.logger.log(`[TERMINATE] Skipping disconnect (session not initialized or process already exited)`);
       }
 
-      // Kill the process
-      session.dapProcess.kill('SIGTERM');
+      // Step 2-5: Force kill with SIGTERM → SIGKILL escalation
+      if (session.dapProcess.exitCode === null) {
+        this.logger.log(`[TERMINATE] Sending SIGTERM to process...`);
+        session.dapProcess.kill('SIGTERM');
 
-      // Cleanup workspace
+        // Wait 2 seconds for graceful SIGTERM exit
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Check if process is still alive
+        if (session.dapProcess.exitCode === null) {
+          this.logger.warn(`[TERMINATE] Process did not exit with SIGTERM, escalating to SIGKILL`);
+          session.dapProcess.kill('SIGKILL');
+
+          // Give SIGKILL a moment to take effect
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } else {
+          this.logger.log(`[TERMINATE] Process exited gracefully with SIGTERM (exit code: ${session.dapProcess.exitCode})`);
+        }
+      } else {
+        this.logger.log(`[TERMINATE] Process already exited (exit code: ${session.dapProcess.exitCode})`);
+      }
+
+      // Step 6: Cleanup workspace (guaranteed to run)
+      this.logger.log(`[TERMINATE] Cleaning up workspace: ${session.workspaceDir}`);
       await this.cleanupWorkspace(session.workspaceDir);
 
       // Remove from sessions map
       this.sessions.delete(sessionId);
+      this.logger.log(`[TERMINATE] Session ${sessionId} terminated successfully`);
 
       return true;
     } catch (error) {
-      this.logger.error(`Failed to terminate session ${sessionId}:`, error);
+      // Even if everything fails, try to cleanup and remove session
+      this.logger.error(`[TERMINATE] Unexpected error during termination of session ${sessionId}:`, error);
+
+      try {
+        await this.cleanupWorkspace(session.workspaceDir);
+      } catch (cleanupError) {
+        this.logger.error(`[TERMINATE] Workspace cleanup also failed:`, cleanupError);
+      }
+
+      this.sessions.delete(sessionId);
+      this.logger.log(`[TERMINATE] Session ${sessionId} removed from map despite errors`);
+
       return false;
     }
   }
@@ -756,11 +823,17 @@ compiler_version = ">=1.0.0"
   /**
    * Send a DAP request and wait for response
    * Matches responses by request_seq to handle concurrent requests correctly
+   *
+   * @param session - The debug session
+   * @param command - The DAP command to send
+   * @param args - Command arguments
+   * @param customTimeout - Optional custom timeout in milliseconds (overrides default)
    */
   private async sendDAPRequest(
     session: DebugSession,
     command: string,
     args?: any,
+    customTimeout?: number,
   ): Promise<DAPResponse> {
     return new Promise((resolve, reject) => {
       const request: DAPRequest = {
@@ -772,6 +845,16 @@ compiler_version = ">=1.0.0"
 
       const requestSeq = request.seq;
       const message = this.formatDAPMessage(request);
+
+      // Determine timeout: custom > command-specific > default
+      let timeoutMs: number;
+      if (customTimeout !== undefined) {
+        timeoutMs = customTimeout;
+      } else if (command === 'disconnect') {
+        timeoutMs = this.dapDisconnectTimeout;
+      } else {
+        timeoutMs = this.dapRequestTimeout;
+      }
 
       // Send request
       session.dapProcess.stdin?.write(message);
@@ -793,11 +876,11 @@ compiler_version = ">=1.0.0"
         }
       }
 
-      // Wait for response (with timeout)
+      // Wait for response (with configurable timeout)
       const timeout = setTimeout(() => {
         session.dapProcess.stdout?.removeListener('data', listener);
-        reject(new Error(`DAP request timeout: ${command}`));
-      }, 5000);
+        reject(new Error(`DAP request timeout: ${command} (${timeoutMs}ms)`));
+      }, timeoutMs);
 
       // Listen for response - check ALL messages in each chunk
       const listener = (data: Buffer) => {
@@ -945,8 +1028,8 @@ compiler_version = ">=1.0.0"
   private async waitForInitialized(session: DebugSession): Promise<void> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        reject(new Error('Timeout waiting for initialized event'));
-      }, 10000);
+        reject(new Error(`Timeout waiting for initialized event (${this.initializedTimeout}ms)`));
+      }, this.initializedTimeout);
 
       const listener = (data: Buffer) => {
         const message = this.parseDAPMessage(data.toString());
@@ -984,8 +1067,8 @@ compiler_version = ">=1.0.0"
 
       // If not in buffer, set up listener for new data
       const timeout = setTimeout(() => {
-        reject(new Error('Timeout waiting for stopped event'));
-      }, 10000);
+        reject(new Error(`Timeout waiting for stopped event (${this.stoppedTimeout}ms)`));
+      }, this.stoppedTimeout);
 
       const listener = (data: Buffer) => {
         const message = this.parseDAPMessage(data.toString());
