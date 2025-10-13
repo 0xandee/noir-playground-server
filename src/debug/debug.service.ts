@@ -203,18 +203,62 @@ compiler_version = ">=1.0.0"
         };
       }
 
-      // Wait for stopped event
-      const stoppedEvent = await this.waitForStoppedEvent(session);
+      // Wait for stopped event (with short wait to see if process exits)
+      try {
+        const stoppedEvent = await this.waitForStoppedEvent(session);
 
-      // Get current state
-      const state = await this.getCurrentDebugState(session, stoppedEvent);
+        // Check if process has exited (program completed)
+        if (session.dapProcess.exitCode !== null) {
+          this.logger.log(`Program execution completed for session ${sessionId}`);
+          return {
+            success: true,
+            state: {
+              sessionId: session.sessionId,
+              stopped: true,
+              reason: 'completed',
+            },
+          };
+        }
 
-      return {
-        success: true,
-        state,
-      };
+        // Get current state
+        const state = await this.getCurrentDebugState(session, stoppedEvent);
+
+        return {
+          success: true,
+          state,
+        };
+      } catch (eventError) {
+        // If we timeout waiting for stopped event, check if process exited
+        if (session.dapProcess.exitCode !== null) {
+          this.logger.log(`Program execution completed for session ${sessionId}`);
+          return {
+            success: true,
+            state: {
+              sessionId: session.sessionId,
+              stopped: true,
+              reason: 'completed',
+            },
+          };
+        }
+        throw eventError;
+      }
     } catch (error) {
       this.logger.error(`Step command failed:`, error);
+
+      // Check if session still exists and process exited (program completed)
+      const currentSession = this.sessions.get(sessionId);
+      if (currentSession && currentSession.dapProcess.exitCode !== null) {
+        this.logger.log(`Program execution completed for session ${sessionId}`);
+        return {
+          success: true,
+          state: {
+            sessionId,
+            stopped: true,
+            reason: 'completed',
+          },
+        };
+      }
+
       return {
         success: false,
         error: error.message || 'Step command failed',
@@ -246,9 +290,11 @@ compiler_version = ">=1.0.0"
       );
 
       if (!stackTraceResponse.success || !stackTraceResponse.body?.stackFrames?.length) {
+        // No stack frames yet (initial state) - return empty variables gracefully
+        this.logger.debug('No stack frames available - returning empty variables (this is expected initially)');
         return {
-          success: false,
-          error: 'No stack frames available',
+          success: true,
+          variables: [],
         };
       }
 
