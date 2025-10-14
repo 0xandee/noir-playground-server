@@ -11,8 +11,8 @@ export default () => ({
     timeouts: {
       // DAP protocol request timeout (default: 5 seconds)
       dapRequest: parseInt(process.env.DAP_REQUEST_TIMEOUT || "5000", 10),
-      // DAP disconnect timeout - longer to allow graceful shutdown (default: 3 minutes)
-      dapDisconnect: parseInt(process.env.DAP_DISCONNECT_TIMEOUT || "180000", 10),
+      // DAP disconnect timeout - longer to allow graceful shutdown (default: 5 seconds)
+      dapDisconnect: parseInt(process.env.DAP_DISCONNECT_TIMEOUT || "5000", 10),
       // Wait for initialized event timeout (default: 10 seconds)
       initialized: parseInt(process.env.DAP_INITIALIZED_TIMEOUT || "10000", 10),
       // Wait for stopped event timeout (default: 10 seconds)

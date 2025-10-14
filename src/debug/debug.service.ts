@@ -65,7 +65,7 @@ compiler_version = ">=1.0.0"
 
     // Load timeout configurations with fallback defaults
     this.dapRequestTimeout = this.configService.get<number>('debug.timeouts.dapRequest', 5000);
-    this.dapDisconnectTimeout = this.configService.get<number>('debug.timeouts.dapDisconnect', 180000);
+    this.dapDisconnectTimeout = this.configService.get<number>('debug.timeouts.dapDisconnect', 5000);
     this.initializedTimeout = this.configService.get<number>('debug.timeouts.initialized', 10000);
     this.stoppedTimeout = this.configService.get<number>('debug.timeouts.stopped', 10000);
     this.compilationTimeout = this.configService.get<number>('debug.timeouts.compilation', 60000);
@@ -682,7 +682,7 @@ compiler_version = ">=1.0.0"
    * Terminate a debug session with graceful disconnect and force-kill fallback
    *
    * Process:
-   * 1. Try graceful DAP disconnect (3-minute timeout)
+   * 1. Try graceful DAP disconnect (5-second timeout)
    * 2. If timeout/failure, proceed with force termination
    * 3. Send SIGTERM to process
    * 4. Wait 2 seconds for graceful exit
@@ -700,7 +700,7 @@ compiler_version = ">=1.0.0"
     this.logger.log(`[TERMINATE] Starting termination for session ${sessionId}`);
 
     try {
-      // Step 1: Try graceful DAP disconnect (automatically uses 3-minute timeout)
+      // Step 1: Try graceful DAP disconnect (automatically uses 5-second timeout)
       if (session.initialized && session.dapProcess.exitCode === null) {
         try {
           this.logger.log(`[TERMINATE] Sending graceful disconnect request (timeout: ${this.dapDisconnectTimeout}ms)...`);
