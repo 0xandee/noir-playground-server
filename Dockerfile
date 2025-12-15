@@ -61,7 +61,7 @@ ENV PATH="/usr/local/bin:$PATH"
 
 # Install noirup and Noir tools
 RUN curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash && \
-    noirup --version 1.0.0-beta.11
+    noirup --version 1.0.0-beta.15
 
 # Install Barretenberg (BB) proving backend
 ENV BB_HOME="/usr/local"

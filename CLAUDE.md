@@ -381,8 +381,8 @@ The service generates multiple profiling visualizations:
 - **Production Stage**: Ubuntu 24.04 with runtime dependencies, pre-installed noir toolchain
 
 #### Tool Installation
-- **Noirup**: Installs Noir toolchain with version `1.0.0-beta.11`
-- **Barretenberg**: Installs proving backend with version `0.84.0`, copies binaries to `/usr/local/bin/`
+- **Noirup**: Installs Noir toolchain with version `1.0.0-beta.15`
+- **Barretenberg**: Installs proving backend with version `1.0.0`, copies binaries to `/usr/local/bin/`
 - **Permissions**: Runs as non-root `nestjs` user, proper file permissions for data directories
 
 #### Container Configuration
